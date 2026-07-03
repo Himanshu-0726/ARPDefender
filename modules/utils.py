@@ -21,53 +21,44 @@ def get_interfaces() -> List[Dict]:
     interfaces = []
     
     try:
-        import netifaces
+        import psutil
         
-        for iface_name in netifaces.interfaces():
+        addrs = psutil.net_if_addrs()
+        stats = psutil.net_if_stats()
+        
+        for iface_name, addr_list in addrs.items():
             iface_info = {
                 'name': iface_name,
                 'addresses': {},
                 'mac': None,
                 'is_up': False,
                 'ipv4': None,
-                'ipv6': None
+                'ipv6': None,
+                'netmask': None,
+                'broadcast': None
             }
             
-            # Get addresses
-            addrs = netifaces.ifaddresses(iface_name)
-            
-            # Get MAC address
-            if netifaces.AF_LINK in addrs:
-                mac_info = addrs[netifaces.AF_LINK][0]
-                iface_info['mac'] = mac_info.get('addr')
-            
-            # Get IPv4
-            if netifaces.AF_INET in addrs:
-                ipv4_info = addrs[netifaces.AF_INET][0]
-                iface_info['ipv4'] = ipv4_info.get('addr')
-                iface_info['netmask'] = ipv4_info.get('netmask')
-                iface_info['broadcast'] = ipv4_info.get('broadcast')
-                iface_info['addresses']['ipv4'] = ipv4_info
-            
-            # Get IPv6
-            if netifaces.AF_INET6 in addrs:
-                ipv6_info = addrs[netifaces.AF_INET6][0]
-                iface_info['ipv6'] = ipv6_info.get('addr')
-                iface_info['addresses']['ipv6'] = ipv6_info
-            
             # Check if interface is up
-            try:
-                import psutil
-                stats = psutil.net_if_stats()
-                if iface_name in stats:
-                    iface_info['is_up'] = stats[iface_name].isup
-            except Exception:
-                pass
+            if iface_name in stats:
+                iface_info['is_up'] = stats[iface_name].isup
+            
+            # Parse addresses
+            import psutil._common as _psutil_common
+            for addr in addr_list:
+                if addr.family == _psutil_common.AF_LINK or (hasattr(_psutil_common, 'AF_PACKET') and addr.family == _psutil_common.AF_PACKET):
+                    iface_info['mac'] = addr.address
+                elif addr.family == socket.AF_INET:
+                    iface_info['ipv4'] = addr.address
+                    iface_info['netmask'] = addr.netmask
+                    iface_info['broadcast'] = addr.broadcast
+                    iface_info['addresses']['ipv4'] = {'addr': addr.address, 'netmask': addr.netmask, 'broadcast': addr.broadcast}
+                elif addr.family == socket.AF_INET6:
+                    iface_info['ipv6'] = addr.address
+                    iface_info['addresses']['ipv6'] = {'addr': addr.address}
             
             interfaces.append(iface_info)
             
     except ImportError:
-        # Fallback if netifaces is not available
         interfaces = _get_interfaces_fallback()
     
     return interfaces
@@ -110,36 +101,59 @@ def get_default_interface() -> Optional[str]:
         Interface name or None
     """
     try:
-        import netifaces
+        import psutil
+        import psutil._common as _psutil_common
         
-        # Try to get default gateway interface
-        gateways = netifaces.gateways()
-        default_gateway = gateways.get('default', {})
+        # Get default route via scapy or system command
+        # psutil doesn't directly expose gateway info, so use subprocess fallback
+        system = platform.system()
         
-        if netifaces.AF_INET in default_gateway:
-            gateway_info = default_gateway[netifaces.AF_INET]
-            if isinstance(gateway_info, tuple) and len(gateway_info) >= 2:
-                return gateway_info[1]
-        
-        # Fallback to first non-loopback interface
-        for iface_name in netifaces.interfaces():
-            if iface_name not in ('lo', 'lo0', 'loopback'):
-                return iface_name
-                
-    except ImportError:
-        # Fallback for Windows
-        try:
+        if system == "Windows":
+            # Parse route print for default gateway interface
             import subprocess
-            result = subprocess.run(['ipconfig'], capture_output=True, text=True)
-            # Parse Windows ipconfig output
+            result = subprocess.run(['route', 'print', '0.0.0.0'], capture_output=True, text=True, timeout=5)
+            # Find the interface with the default route
+            addrs = psutil.net_if_addrs()
+            stats = psutil.net_if_stats()
             for line in result.stdout.split('\n'):
-                if 'adapter' in line.lower() and 'loopback' not in line.lower():
-                    # Extract adapter name
-                    match = re.search(r'adapter\s+(.+?):', line)
+                match = re.search(r'0\.0\.0\.0\s+0\.0\.0\.0\s+(\d+\.\d+\.\d+\.\d+)', line)
+                if match:
+                    gateway_ip = match.group(1)
+                    # Find which interface has this gateway's network
+                    for iface_name in stats:
+                        if stats[iface_name].isup and iface_name in addrs:
+                            for addr in addrs[iface_name]:
+                                if addr.family == socket.AF_INET and addr.address:
+                                    return iface_name
+        
+        elif system == "Linux":
+            import subprocess
+            result = subprocess.run(['ip', 'route', 'show', 'default'], 
+                                  capture_output=True, text=True, timeout=5)
+            for line in result.stdout.split('\n'):
+                if 'dev' in line:
+                    match = re.search(r'dev\s+(\S+)', line)
                     if match:
                         return match.group(1)
-        except Exception:
-            pass
+        
+        elif system == "Darwin":
+            import subprocess
+            result = subprocess.run(['route', '-n', 'get', 'default'], 
+                                  capture_output=True, text=True, timeout=5)
+            for line in result.stdout.split('\n'):
+                if 'interface:' in line:
+                    match = re.search(r'interface:\s*(\S+)', line)
+                    if match:
+                        return match.group(1)
+        
+        # Fallback: first non-loopback interface that is up
+        stats = psutil.net_if_stats()
+        for iface_name, stat in stats.items():
+            if stat.isup and iface_name not in ('lo', 'lo0', 'loopback'):
+                return iface_name
+                
+    except Exception:
+        pass
     
     return None
 
@@ -743,46 +757,34 @@ def get_gateway_ip() -> Optional[str]:
         Gateway IP address or None
     """
     try:
-        import netifaces
+        import subprocess
+        system = platform.system()
         
-        gateways = netifaces.gateways()
-        default_gateway = gateways.get('default', {})
-        
-        if netifaces.AF_INET in default_gateway:
-            gateway_info = default_gateway[netifaces.AF_INET]
-            if isinstance(gateway_info, tuple) and len(gateway_info) >= 1:
-                return gateway_info[0]
-        
-    except ImportError:
-        try:
-            import subprocess
-            system = platform.system()
-            
-            if system == "Windows":
-                result = subprocess.run(['ipconfig'], capture_output=True, text=True)
-                for line in result.stdout.split('\n'):
-                    if 'default gateway' in line.lower():
-                        match = re.search(r'(\d+\.\d+\.\d+\.\d+)', line)
-                        if match:
-                            return match.group(1)
-            elif system == "Linux":
-                result = subprocess.run(['ip', 'route', 'show', 'default'], 
-                                      capture_output=True, text=True)
-                for line in result.stdout.split('\n'):
-                    if 'default' in line:
-                        match = re.search(r'via\s+(\d+\.\d+\.\d+\.\d+)', line)
-                        if match:
-                            return match.group(1)
-            elif system == "Darwin":  # macOS
-                result = subprocess.run(['netstat', '-nr', 'default'], 
-                                      capture_output=True, text=True)
-                for line in result.stdout.split('\n'):
-                    if 'default' in line:
-                        match = re.search(r'(\d+\.\d+\.\d+\.\d+)', line)
-                        if match:
-                            return match.group(1)
-        except Exception:
-            pass
+        if system == "Windows":
+            result = subprocess.run(['ipconfig'], capture_output=True, text=True, timeout=5)
+            for line in result.stdout.split('\n'):
+                if 'default gateway' in line.lower():
+                    match = re.search(r'(\d+\.\d+\.\d+\.\d+)', line)
+                    if match:
+                        return match.group(1)
+        elif system == "Linux":
+            result = subprocess.run(['ip', 'route', 'show', 'default'], 
+                                  capture_output=True, text=True, timeout=5)
+            for line in result.stdout.split('\n'):
+                if 'default' in line:
+                    match = re.search(r'via\s+(\d+\.\d+\.\d+\.\d+)', line)
+                    if match:
+                        return match.group(1)
+        elif system == "Darwin":
+            result = subprocess.run(['netstat', '-nr', 'default'], 
+                                  capture_output=True, text=True, timeout=5)
+            for line in result.stdout.split('\n'):
+                if 'default' in line:
+                    match = re.search(r'(\d+\.\d+\.\d+\.\d+)', line)
+                    if match:
+                        return match.group(1)
+    except Exception:
+        pass
     
     return None
 
@@ -795,8 +797,6 @@ def get_network_cidr() -> Optional[str]:
         Network CIDR or None
     """
     try:
-        import netifaces
-        
         ip = get_local_ip()
         if not ip or ip == "127.0.0.1":
             return None
