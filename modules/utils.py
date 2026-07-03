@@ -43,9 +43,10 @@ def get_interfaces() -> List[Dict]:
                 iface_info['is_up'] = stats[iface_name].isup
             
             # Parse addresses
-            import psutil._common as _psutil_common
             for addr in addr_list:
-                if addr.family == _psutil_common.AF_LINK or (hasattr(_psutil_common, 'AF_PACKET') and addr.family == _psutil_common.AF_PACKET):
+                # MAC address (AF_LINK on Windows/Linux, AF_PACKET on Linux)
+                family_name = addr.family.name if hasattr(addr.family, 'name') else str(addr.family)
+                if family_name in ('AF_LINK', 'AF_PACKET'):
                     iface_info['mac'] = addr.address
                 elif addr.family == socket.AF_INET:
                     iface_info['ipv4'] = addr.address
@@ -102,9 +103,8 @@ def get_default_interface() -> Optional[str]:
     """
     try:
         import psutil
-        import psutil._common as _psutil_common
         
-        # Get default route via scapy or system command
+        # Get default route via system command
         # psutil doesn't directly expose gateway info, so use subprocess fallback
         system = platform.system()
         
