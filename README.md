@@ -87,8 +87,9 @@ Attack Detection:
 
 ### Steps
 
-1. **Clone or download the project:**
+1. **Clone the project:**
    ```bash
+   git clone https://github.com/Himanshu-0726/ARPDefender.git
    cd ARPDefender
    ```
 
