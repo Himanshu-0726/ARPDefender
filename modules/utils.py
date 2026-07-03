@@ -7,9 +7,8 @@ Helper functions for network interface detection, validation, and MAC vendor loo
 
 import re
 import socket
-import struct
 import platform
-from typing import Optional, Dict, List, Tuple
+from typing import Optional, Dict, List
 
 
 def get_interfaces() -> List[Dict]:

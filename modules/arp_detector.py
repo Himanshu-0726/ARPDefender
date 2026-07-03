@@ -248,9 +248,6 @@ class ARPDetector:
         self.suspicious_sources: Dict[str, int] = defaultdict(int)
         self.alert_counts: Dict[str, int] = defaultdict(int)
         
-        # Pending ARP requests (request without reply)
-        self.pending_requests: Dict[str, float] = {}
-        
         # Monitoring thread
         self.monitor_thread = None
         self.is_monitoring = False
