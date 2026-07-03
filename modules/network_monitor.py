@@ -44,6 +44,9 @@ class NetworkMonitor:
         self.monitor_config = self.config.get('monitoring', {})
         self.logger = logger
         
+        # Thread safety lock
+        self._lock = threading.Lock()
+        
         # Traffic statistics
         self.traffic_stats: Dict[str, TrafficStats] = {}
         
@@ -57,6 +60,8 @@ class NetworkMonitor:
         self.bandwidth_samples: List[Dict] = []
         self.total_bytes = 0
         self.total_packets = 0
+        self._last_bytes = 0
+        self._last_packets = 0
         
         # Time tracking
         self.start_time = datetime.now()
@@ -85,29 +90,30 @@ class NetworkMonitor:
         protocol = packet_info.get('protocol', 'Unknown')
         size = packet_info.get('size', 0)
         
-        # Update total counts
-        self.total_packets += 1
-        self.total_bytes += size
-        
-        # Update protocol counts
-        self.protocol_counts[protocol] += 1
-        
-        # Update traffic stats for source IP
-        if src_ip:
-            self._update_ip_stats(src_ip, 'sent', size, protocol)
-        
-        # Update traffic stats for destination IP
-        if dst_ip:
-            self._update_ip_stats(dst_ip, 'received', size, protocol)
-        
-        # Update port activity
-        src_port = packet_info.get('source_port')
-        dst_port = packet_info.get('destination_port')
-        
-        if src_port:
-            self.port_activity[src_port] += 1
-        if dst_port:
-            self.port_activity[dst_port] += 1
+        with self._lock:
+            # Update total counts
+            self.total_packets += 1
+            self.total_bytes += size
+            
+            # Update protocol counts
+            self.protocol_counts[protocol] += 1
+            
+            # Update traffic stats for source IP
+            if src_ip:
+                self._update_ip_stats(src_ip, 'sent', size, protocol)
+            
+            # Update traffic stats for destination IP
+            if dst_ip:
+                self._update_ip_stats(dst_ip, 'received', size, protocol)
+            
+            # Update port activity
+            src_port = packet_info.get('source_port')
+            dst_port = packet_info.get('destination_port')
+            
+            if src_port:
+                self.port_activity[src_port] += 1
+            if dst_port:
+                self.port_activity[dst_port] += 1
     
     def _update_ip_stats(self, ip: str, direction: str, size: int, protocol: str):
         """
@@ -140,65 +146,66 @@ class NetworkMonitor:
         Returns:
             Dictionary with traffic statistics
         """
-        elapsed_time = (datetime.now() - self.start_time).total_seconds()
-        
-        # Calculate bandwidth
-        bytes_per_second = self.total_bytes / elapsed_time if elapsed_time > 0 else 0
-        packets_per_second = self.total_packets / elapsed_time if elapsed_time > 0 else 0
-        
-        # Protocol breakdown
-        protocol_percentages = {}
-        for proto, count in self.protocol_counts.items():
-            protocol_percentages[proto] = (count / self.total_packets * 100) if self.total_packets > 0 else 0
-        
-        # Top talkers (by total traffic)
-        top_talkers = sorted(
-            self.traffic_stats.values(),
-            key=lambda s: s.bytes_sent + s.bytes_received,
-            reverse=True
-        )[:10]
-        
-        # Top ports
-        top_ports = sorted(
-            self.port_activity.items(),
-            key=lambda x: x[1],
-            reverse=True
-        )[:10]
-        
-        stats = {
-            'total_packets': self.total_packets,
-            'total_bytes': self.total_bytes,
-            'bytes_per_second': bytes_per_second,
-            'packets_per_second': packets_per_second,
-            'protocol_counts': dict(self.protocol_counts),
-            'protocol_percentages': protocol_percentages,
-            'unique_ips': len(self.traffic_stats),
-            'uptime_seconds': elapsed_time,
-            'top_talkers': [
-                {
-                    'ip': t.ip,
-                    'bytes_sent': t.bytes_sent,
-                    'bytes_received': t.bytes_received,
-                    'total_bytes': t.bytes_sent + t.bytes_received,
-                    'packets_sent': t.packets_sent,
-                    'packets_received': t.packets_received
-                }
-                for t in top_talkers
-            ],
-            'top_ports': [{'port': port, 'count': count} for port, count in top_ports]
-        }
-        
-        # Add protocol-specific counts
-        stats['tcp_packets'] = self.protocol_counts.get('TCP', 0)
-        stats['udp_packets'] = self.protocol_counts.get('UDP', 0)
-        stats['icmp_packets'] = self.protocol_counts.get('ICMP', 0)
-        stats['arp_packets'] = self.protocol_counts.get('ARP', 0)
-        stats['other_packets'] = self.total_packets - (
-            stats['tcp_packets'] + stats['udp_packets'] + 
-            stats['icmp_packets'] + stats['arp_packets']
-        )
-        
-        return stats
+        with self._lock:
+            elapsed_time = (datetime.now() - self.start_time).total_seconds()
+            
+            # Calculate bandwidth
+            bytes_per_second = self.total_bytes / elapsed_time if elapsed_time > 0 else 0
+            packets_per_second = self.total_packets / elapsed_time if elapsed_time > 0 else 0
+            
+            # Protocol breakdown
+            protocol_percentages = {}
+            for proto, count in self.protocol_counts.items():
+                protocol_percentages[proto] = (count / self.total_packets * 100) if self.total_packets > 0 else 0
+            
+            # Top talkers (by total traffic)
+            top_talkers = sorted(
+                self.traffic_stats.values(),
+                key=lambda s: s.bytes_sent + s.bytes_received,
+                reverse=True
+            )[:10]
+            
+            # Top ports
+            top_ports = sorted(
+                self.port_activity.items(),
+                key=lambda x: x[1],
+                reverse=True
+            )[:10]
+            
+            stats = {
+                'total_packets': self.total_packets,
+                'total_bytes': self.total_bytes,
+                'bytes_per_second': bytes_per_second,
+                'packets_per_second': packets_per_second,
+                'protocol_counts': dict(self.protocol_counts),
+                'protocol_percentages': protocol_percentages,
+                'unique_ips': len(self.traffic_stats),
+                'uptime_seconds': elapsed_time,
+                'top_talkers': [
+                    {
+                        'ip': t.ip,
+                        'bytes_sent': t.bytes_sent,
+                        'bytes_received': t.bytes_received,
+                        'total_bytes': t.bytes_sent + t.bytes_received,
+                        'packets_sent': t.packets_sent,
+                        'packets_received': t.packets_received
+                    }
+                    for t in top_talkers
+                ],
+                'top_ports': [{'port': port, 'count': count} for port, count in top_ports]
+            }
+            
+            # Add protocol-specific counts
+            stats['tcp_packets'] = self.protocol_counts.get('TCP', 0)
+            stats['udp_packets'] = self.protocol_counts.get('UDP', 0)
+            stats['icmp_packets'] = self.protocol_counts.get('ICMP', 0)
+            stats['arp_packets'] = self.protocol_counts.get('ARP', 0)
+            stats['other_packets'] = self.total_packets - (
+                stats['tcp_packets'] + stats['udp_packets'] + 
+                stats['icmp_packets'] + stats['arp_packets']
+            )
+            
+            return stats
     
     def get_ip_statistics(self, ip: str) -> Optional[Dict]:
         """
@@ -315,26 +322,28 @@ class NetworkMonitor:
     def _record_bandwidth_sample(self):
         """Record a bandwidth sample for trend analysis."""
         current_time = datetime.now()
-        elapsed = (current_time - self.last_update).total_seconds()
         
-        if elapsed > 0:
-            sample = {
-                'timestamp': current_time.isoformat(),
-                'total_bytes': self.total_bytes,
-                'total_packets': self.total_packets,
-                'bytes_per_second': (self.total_bytes - getattr(self, '_last_bytes', 0)) / elapsed,
-                'packets_per_second': (self.total_packets - getattr(self, '_last_packets', 0)) / elapsed
-            }
+        with self._lock:
+            elapsed = (current_time - self.last_update).total_seconds()
             
-            self.bandwidth_samples.append(sample)
+            if elapsed > 0:
+                sample = {
+                    'timestamp': current_time.isoformat(),
+                    'total_bytes': self.total_bytes,
+                    'total_packets': self.total_packets,
+                    'bytes_per_second': (self.total_bytes - self._last_bytes) / elapsed,
+                    'packets_per_second': (self.total_packets - self._last_packets) / elapsed
+                }
+                
+                self.bandwidth_samples.append(sample)
+                
+                # Keep only last 100 samples
+                if len(self.bandwidth_samples) > 100:
+                    self.bandwidth_samples = self.bandwidth_samples[-100:]
             
-            # Keep only last 100 samples
-            if len(self.bandwidth_samples) > 100:
-                self.bandwidth_samples = self.bandwidth_samples[-100:]
-        
-        self._last_bytes = self.total_bytes
-        self._last_packets = self.total_packets
-        self.last_update = current_time
+            self._last_bytes = self.total_bytes
+            self._last_packets = self.total_packets
+            self.last_update = current_time
     
     def get_bandwidth_history(self) -> List[Dict]:
         """Get bandwidth history samples."""
@@ -342,13 +351,16 @@ class NetworkMonitor:
     
     def clear_statistics(self):
         """Clear all statistics."""
-        self.traffic_stats.clear()
-        self.protocol_counts.clear()
-        self.port_activity.clear()
-        self.bandwidth_samples.clear()
-        self.total_bytes = 0
-        self.total_packets = 0
-        self.start_time = datetime.now()
+        with self._lock:
+            self.traffic_stats.clear()
+            self.protocol_counts.clear()
+            self.port_activity.clear()
+            self.bandwidth_samples.clear()
+            self.total_bytes = 0
+            self.total_packets = 0
+            self._last_bytes = 0
+            self._last_packets = 0
+            self.start_time = datetime.now()
         print("Cleared network statistics")
     
     def print_statistics(self):

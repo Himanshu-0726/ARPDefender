@@ -61,6 +61,7 @@ class PacketSniffer:
         """
         self.config = config or {}
         self.running = False
+        self._stopped = False
         
         # Initialize components
         self.logger = Logger(self.config)
@@ -75,6 +76,7 @@ class PacketSniffer:
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals."""
         print("\n\nShutting down gracefully...")
+        self.running = False
         self.stop()
         sys.exit(0)
     
@@ -115,14 +117,13 @@ class PacketSniffer:
         
         print("\n" + "-" * 50 + "\n")
     
-    def start(self, interface: str = None, arp_only: bool = False,
+    def start(self, interface: str = None,
              save_file: str = None, verbose: bool = False, quiet: bool = False):
         """
         Start packet capture and monitoring.
         
         Args:
             interface: Network interface name (None for auto-detect)
-            arp_only: Only run ARP detection (no packet capture)
             save_file: Save captured packets to this file
             verbose: Show detailed packet information
             quiet: Suppress console output
@@ -151,9 +152,8 @@ class PacketSniffer:
             # Start network monitoring
             self.network_monitor.start_monitoring()
             
-            # Start packet capture (unless ARP-only mode)
-            if not arp_only:
-                self.capture.start_capture(
+            # Start packet capture
+            self.capture.start_capture(
                     interface=interface_name,
                     filter_str=self.config.get('network', {}).get('capture_filters', ''),
                     max_packets=self.config.get('network', {}).get('max_packets', 0),
@@ -211,6 +211,9 @@ class PacketSniffer:
     
     def stop(self):
         """Stop all monitoring and capture."""
+        if self._stopped:
+            return
+        self._stopped = True
         self.running = False
         
         # Stop packet capture
@@ -416,7 +419,6 @@ Examples:
         else:
             sniffer.start(
                 interface=args.interface,
-                arp_only=args.arp_only,
                 save_file=args.save,
                 verbose=args.verbose,
                 quiet=args.quiet

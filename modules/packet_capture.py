@@ -6,8 +6,6 @@ Core packet capture functionality using Scapy library.
 """
 
 import os
-import sys
-import time
 import threading
 from datetime import datetime
 from typing import Dict, List, Optional, Callable
@@ -29,6 +27,8 @@ from .utils import (
     get_interfaces, get_default_interface, validate_interface,
     get_protocol_name, get_port_service, get_mac_vendor
 )
+
+MAX_CAPTURED_PACKETS = 100000
 
 
 class PacketCapture:
@@ -53,6 +53,7 @@ class PacketCapture:
         self.captured_packets = []
         self.packet_count = 0
         self.capture_thread = None
+        self._sniff_stop_event = threading.Event()
         
         # Callbacks
         self.packet_callback = None
@@ -209,11 +210,20 @@ class PacketCapture:
                 if dns.qr == 0:  # DNS Query
                     if packet.haslayer(DNSQR):
                         query = packet[DNSQR]
-                        packet_info['info'] = f"DNS Query: {query.qname.decode()}"
+                        qname = query.qname
+                        if isinstance(qname, bytes):
+                            qname = qname.decode(errors='replace')
+                        packet_info['info'] = f"DNS Query: {qname}"
                 else:  # DNS Response
                     if packet.haslayer(DNSRR):
                         rr = packet[DNSRR]
-                        packet_info['info'] = f"DNS Response: {rr.rrname.decode()} -> {rr.rdata}"
+                        rrname = rr.rrname
+                        if isinstance(rrname, bytes):
+                            rrname = rrname.decode(errors='replace')
+                        rdata = rr.rdata
+                        if isinstance(rdata, bytes):
+                            rdata = rdata.decode(errors='replace')
+                        packet_info['info'] = f"DNS Response: {rrname} -> {rdata}"
             
             # Raw data
             if packet.haslayer(Raw):
@@ -239,8 +249,9 @@ class PacketCapture:
         packet_info = self._parse_packet(packet)
         
         if packet_info:
-            # Store packet
-            self.captured_packets.append(packet_info)
+            # Store packet (with memory limit)
+            if len(self.captured_packets) < MAX_CAPTURED_PACKETS:
+                self.captured_packets.append(packet_info)
             
             # Log packet
             if self.logger:
@@ -278,10 +289,12 @@ class PacketCapture:
         capture_args = {
             'iface': iface,
             'prn': self._packet_handler,
-            'store': False
+            'store': False,
+            'stop_filter': lambda p: self._sniff_stop_event.is_set()
         }
         
-        if filter_str:
+        # Only add filter if non-empty
+        if filter_str and filter_str.strip():
             capture_args['filter'] = filter_str
         
         if max_packets > 0:
@@ -292,8 +305,9 @@ class PacketCapture:
         
         # Start capture in background thread
         self.is_capturing = True
-        self.packet_count = 0
-        self.captured_packets = []
+        self._sniff_stop_event.clear()
+        
+        # Don't clear previous packets - preserve them for restart scenarios
         
         def capture_thread():
             try:
@@ -310,7 +324,10 @@ class PacketCapture:
     
     def stop_capture(self):
         """Stop packet capture."""
+        self._sniff_stop_event.set()
         self.is_capturing = False
+        if self.capture_thread and self.capture_thread.is_alive():
+            self.capture_thread.join(timeout=5)
         print(f"Stopped packet capture. Captured {self.packet_count} packets.")
     
     def save_to_pcap(self, filename: str = None, packets: List = None) -> str:

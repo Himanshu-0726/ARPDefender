@@ -62,7 +62,7 @@ def get_interfaces() -> List[Dict]:
                 stats = psutil.net_if_stats()
                 if iface_name in stats:
                     iface_info['is_up'] = stats[iface_name].isup
-            except:
+            except Exception:
                 pass
             
             interfaces.append(iface_info)
@@ -97,7 +97,7 @@ def _get_interfaces_fallback() -> List[Dict]:
             'netmask': None,
             'broadcast': None
         })
-    except:
+    except Exception:
         pass
     
     return interfaces
@@ -124,7 +124,7 @@ def get_default_interface() -> Optional[str]:
         
         # Fallback to first non-loopback interface
         for iface_name in netifaces.interfaces():
-            if iface_name != 'lo' and iface_name != 'loopback':
+            if iface_name not in ('lo', 'lo0', 'loopback'):
                 return iface_name
                 
     except ImportError:
@@ -139,7 +139,7 @@ def get_default_interface() -> Optional[str]:
                     match = re.search(r'adapter\s+(.+?):', line)
                     if match:
                         return match.group(1)
-        except:
+        except Exception:
             pass
     
     return None
@@ -487,7 +487,6 @@ def get_mac_vendor(mac: str) -> str:
         '00:02:01': 'AMD',
         '00:03:6B': 'Cisco',
         '00:04:5A': 'Cisco',
-        '00:05:02': '3Com',
         '00:06:52': 'Cisco',
         '00:07:0C': 'Cisco',
         '00:08:21': 'Cisco',
@@ -543,17 +542,14 @@ def get_mac_vendor(mac: str) -> str:
         '00:18:51': 'Hyper-V',
         # Apple
         '00:03:93': 'Apple',
-        '00:05:02': 'Apple',
         '00:06:0B': 'Apple',
         '00:07:09': 'Apple',
         '00:08:00': 'Apple',
         '00:09:6A': 'Apple',
         '00:0A:95': 'Apple',
         '00:0B:12': 'Apple',
-        '00:0C:29': 'Apple',
         '00:0D:93': 'Apple',
         '00:0E:58': 'Apple',
-        '00:0F:00': 'Apple',
         '00:10:FA': 'Apple',
         '00:11:24': 'Apple',
         '00:12:00': 'Apple',
@@ -590,7 +586,6 @@ def get_mac_vendor(mac: str) -> str:
         '00:12:5A': 'Microsoft',
         '00:15:5D': 'Microsoft',
         '00:17:FA': 'Microsoft',
-        '00:18:51': 'Microsoft',
         '00:1A:11': 'Microsoft',
         '00:1B:21': 'Microsoft',
         '00:1C:42': 'Microsoft',
@@ -606,36 +601,12 @@ def get_mac_vendor(mac: str) -> str:
         'C8:3F:26': 'Microsoft',
         'DC:B4:C4': 'Microsoft',
         # Google
-        '00:1A:11': 'Google',
-        '00:1B:21': 'Google',
-        '00:1C:42': 'Google',
-        '00:1D:37': 'Google',
-        '00:1E:C2': 'Google',
-        '00:1F:3B': 'Google',
         '3C:5A:B4': 'Google',
         '54:60:09': 'Google',
         'A4:77:33': 'Google',
         'F4:F5:D8': 'Google',
         # Samsung
         '00:07:AB': 'Samsung',
-        '00:0E:58': 'Samsung',
-        '00:0F:00': 'Samsung',
-        '00:10:FA': 'Samsung',
-        '00:11:24': 'Samsung',
-        '00:12:00': 'Samsung',
-        '00:13:00': 'Samsung',
-        '00:14:51': 'Samsung',
-        '00:15:30': 'Samsung',
-        '00:16:CB': 'Samsung',
-        '00:17:88': 'Samsung',
-        '00:18:B9': 'Samsung',
-        '00:19:E3': 'Samsung',
-        '00:1A:11': 'Samsung',
-        '00:1B:63': 'Samsung',
-        '00:1C:B3': 'Samsung',
-        '00:1D:4F': 'Samsung',
-        '00:1E:52': 'Samsung',
-        '00:1F:5B': 'Samsung',
         '00:21:D1': 'Samsung',
         '00:22:58': 'Samsung',
         '00:23:39': 'Samsung',
@@ -644,7 +615,6 @@ def get_mac_vendor(mac: str) -> str:
         '00:26:37': 'Samsung',
         '00:26:5D': 'Samsung',
         # Intel
-        '00:02:01': 'Intel',
         '00:02:02': 'Intel',
         '00:02:03': 'Intel',
         '00:02:04': 'Intel',
@@ -665,11 +635,9 @@ def get_mac_vendor(mac: str) -> str:
         '00:16:EA': 'Intel',
         '00:18:8B': 'Intel',
         '00:19:D1': 'Intel',
-        '00:1B:21': 'Intel',
         '00:1C:23': 'Intel',
         '00:1D:E5': 'Intel',
         '00:1E:65': 'Intel',
-        '00:1F:3B': 'Intel',
         '00:20:21': 'Intel',
         '00:21:5A': 'Intel',
         '00:22:FA': 'Intel',
@@ -694,7 +662,6 @@ def get_mac_vendor(mac: str) -> str:
         '00:15:C5': 'Dell',
         '00:16:35': 'Dell',
         '00:17:31': 'Dell',
-        '00:18:8B': 'Dell',
         '00:19:99': 'Dell',
         '00:1A:A0': 'Dell',
         '00:1B:24': 'Dell',
@@ -708,7 +675,6 @@ def get_mac_vendor(mac: str) -> str:
         '00:24:E8': 'Dell',
         '00:26:B9': 'Dell',
         # HP
-        '00:01:02': 'HP',
         '00:02:00': 'HP',
         '00:03:00': 'HP',
         '00:04:00': 'HP',
@@ -766,7 +732,7 @@ def get_local_ip() -> str:
         ip = s.getsockname()[0]
         s.close()
         return ip
-    except:
+    except Exception:
         return "127.0.0.1"
 
 
@@ -816,7 +782,7 @@ def get_gateway_ip() -> Optional[str]:
                         match = re.search(r'(\d+\.\d+\.\d+\.\d+)', line)
                         if match:
                             return match.group(1)
-        except:
+        except Exception:
             pass
     
     return None
@@ -852,7 +818,7 @@ def get_network_cidr() -> Optional[str]:
                 
                 return f"{network}/{cidr}"
         
-    except:
+    except Exception:
         pass
     
     return None

@@ -52,84 +52,81 @@ class ARPTable:
             return None
         
         normalized_mac = normalize_mac(mac)
-        normalized_ip = ip.lower()
         
-        alert_info = None
+        alerts = []
         
         with self.lock:
             current_time = datetime.now()
             
             # Check if IP already has a different MAC
-            if normalized_ip in self.ip_to_mac:
-                old_mac = self.ip_to_mac[normalized_ip]
+            if ip in self.ip_to_mac:
+                old_mac = self.ip_to_mac[ip]
                 
                 if old_mac.lower() != normalized_mac.lower():
                     # MAC change detected!
-                    alert_info = {
+                    alerts.append({
                         'type': 'mac_change',
                         'ip': ip,
                         'old_mac': old_mac,
                         'new_mac': normalized_mac,
                         'timestamp': current_time,
                         'severity': 'HIGH'
-                    }
+                    })
                     
                     # Record history
-                    self.history[normalized_ip].append((current_time, old_mac, normalized_mac))
+                    self.history[ip].append((current_time, old_mac, normalized_mac))
+                    
+                    # Remove IP from old MAC's reverse mapping
+                    for mac_key in list(self.mac_to_ips.keys()):
+                        if mac_key.lower() == old_mac.lower():
+                            self.mac_to_ips[mac_key].discard(ip)
+                            break
             
             # Check if MAC is associated with multiple IPs
-            if normalized_mac.lower() not in [m.lower() for m in self.mac_to_ips.keys()]:
-                # New MAC
-                pass
-            else:
-                # Find the existing MAC key (case-insensitive)
-                existing_mac_key = None
-                for m in self.mac_to_ips.keys():
-                    if m.lower() == normalized_mac.lower():
-                        existing_mac_key = m
-                        break
-                
-                if existing_mac_key and normalized_ip not in self.mac_to_ips[existing_mac_key]:
+            existing_mac_key = None
+            for m in self.mac_to_ips.keys():
+                if m.lower() == normalized_mac.lower():
+                    existing_mac_key = m
+                    break
+            
+            if existing_mac_key:
+                existing_ips = self.mac_to_ips[existing_mac_key]
+                if ip not in existing_ips and len(existing_ips) > 0:
                     # MAC is now associated with a new IP
-                    existing_ips = self.mac_to_ips[existing_mac_key]
-                    
-                    if len(existing_ips) > 0:
-                        alert_info = {
-                            'type': 'mac_multiple_ips',
-                            'ip': ip,
-                            'mac': normalized_mac,
-                            'existing_ips': list(existing_ips),
-                            'timestamp': current_time,
-                            'severity': 'MEDIUM'
-                        }
+                    alerts.append({
+                        'type': 'mac_multiple_ips',
+                        'ip': ip,
+                        'mac': normalized_mac,
+                        'existing_ips': list(existing_ips),
+                        'timestamp': current_time,
+                        'severity': 'MEDIUM'
+                    })
             
             # Update mappings
-            old_mac = self.ip_to_mac.get(normalized_ip)
-            self.ip_to_mac[normalized_ip] = normalized_mac
+            self.ip_to_mac[ip] = normalized_mac
             
             # Update reverse mapping
-            for mac_key in list(self.mac_to_ips.keys()):
-                if mac_key.lower() == normalized_mac.lower():
-                    self.mac_to_ips[mac_key].add(normalized_ip)
-                    break
+            if existing_mac_key:
+                self.mac_to_ips[existing_mac_key].add(ip)
             else:
-                self.mac_to_ips[normalized_mac].add(normalized_ip)
+                self.mac_to_ips[normalized_mac].add(ip)
             
             # Update timestamps
-            if normalized_ip not in self.timestamps:
-                self.timestamps[normalized_ip] = {
+            if ip not in self.timestamps:
+                self.timestamps[ip] = {
                     'first_seen': current_time,
                     'last_seen': current_time
                 }
             else:
-                self.timestamps[normalized_ip]['last_seen'] = current_time
+                self.timestamps[ip]['last_seen'] = current_time
         
-        return alert_info
+        # Return first alert (most severe) or None
+        return alerts[0] if alerts else None
     
     def get_mac(self, ip: str) -> Optional[str]:
         """Get MAC address for an IP."""
         with self.lock:
-            return self.ip_to_mac.get(ip.lower())
+            return self.ip_to_mac.get(ip)
     
     def get_ips(self, mac: str) -> List[str]:
         """Get all IPs associated with a MAC."""
@@ -158,24 +155,23 @@ class ARPTable:
     def get_history(self, ip: str) -> List[Tuple[datetime, str, str]]:
         """Get MAC change history for an IP."""
         with self.lock:
-            return self.history.get(ip.lower(), [])
+            return self.history.get(ip, [])
     
     def remove_entry(self, ip: str):
         """Remove an IP-MAC mapping."""
         with self.lock:
-            normalized_ip = ip.lower()
-            if normalized_ip in self.ip_to_mac:
-                mac = self.ip_to_mac[normalized_ip]
-                del self.ip_to_mac[normalized_ip]
+            if ip in self.ip_to_mac:
+                mac = self.ip_to_mac[ip]
+                del self.ip_to_mac[ip]
                 
                 # Remove from reverse mapping
                 for m in self.mac_to_ips.keys():
                     if m.lower() == mac.lower():
-                        self.mac_to_ips[m].discard(normalized_ip)
+                        self.mac_to_ips[m].discard(ip)
                         break
                 
-                if normalized_ip in self.timestamps:
-                    del self.timestamps[normalized_ip]
+                if ip in self.timestamps:
+                    del self.timestamps[ip]
     
     def clear(self):
         """Clear the entire ARP table."""
@@ -266,9 +262,14 @@ class ARPDetector:
         # Normalize MAC addresses in whitelist
         normalized_whitelist = []
         for entry in whitelist:
+            ip = entry.get('ip', '')
+            mac = entry.get('mac', '')
+            # Skip entries with empty IP or MAC
+            if not ip or not mac:
+                continue
             normalized_entry = {
-                'ip': entry.get('ip', '').lower(),
-                'mac': normalize_mac(entry.get('mac', '')),
+                'ip': ip,
+                'mac': normalize_mac(mac),
                 'description': entry.get('description', '')
             }
             normalized_whitelist.append(normalized_entry)
@@ -286,11 +287,10 @@ class ARPDetector:
         Returns:
             True if whitelisted
         """
-        normalized_ip = ip.lower()
         normalized_mac = normalize_mac(mac)
         
         for entry in self.whitelist:
-            if entry['ip'] == normalized_ip and entry['mac'] == normalized_mac:
+            if entry['ip'] == ip and entry['mac'] == normalized_mac:
                 return True
         
         return False
@@ -323,24 +323,25 @@ class ARPDetector:
         
         # Determine ARP type from info
         info = packet_info.get('info', '')
-        is_gratuitous = 'Tell' not in info and src_ip == dst_ip
+        # Gratuitous ARP: source IP equals destination IP (unsolicited announcement)
+        # Normal replies like "X is at Y" don't contain "Tell" but are NOT gratuitous
+        is_gratuitous = (src_ip == dst_ip)
         
-        # Update ARP table
-        alert = self.arp_table.add_entry(src_ip, src_mac, is_gratuitous)
-        
-        if alert:
-            # Log the alert
-            self._handle_alert(alert, packet_info)
-            return alert
-        
-        # Check for gratuitous ARP (unsolicited reply)
+        # Check for gratuitous ARP BEFORE updating the table
+        alert = None
         if is_gratuitous:
             alert = self._check_gratuitous_arp(src_ip, src_mac)
-            if alert:
-                self._handle_alert(alert, packet_info)
-                return alert
         
-        return None
+        # Update ARP table
+        table_alert = self.arp_table.add_entry(src_ip, src_mac, is_gratuitous)
+        
+        if table_alert:
+            self._handle_alert(table_alert, packet_info)
+            alert = table_alert
+        elif alert:
+            self._handle_alert(alert, packet_info)
+        
+        return alert
     
     def _check_gratuitous_arp(self, ip: str, mac: str) -> Optional[Dict]:
         """

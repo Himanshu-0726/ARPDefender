@@ -11,10 +11,14 @@ import time
 import json
 import sqlite3
 import logging
+import threading
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from typing import Dict, List, Optional, Any
 from pathlib import Path
+
+DB_COMMIT_BATCH_SIZE = 50
+DB_COMMIT_INTERVAL = 2.0
 
 
 class Color:
@@ -23,6 +27,7 @@ class Color:
     BOLD = '\033[1m'
     
     # Basic colors
+    BLACK = '\033[30m'
     RED = '\033[91m'
     GREEN = '\033[92m'
     YELLOW = '\033[93m'
@@ -68,6 +73,11 @@ class Logger:
         self.capture_dir = self.log_config.get('capture_dir', 'captures')
         self._ensure_directories()
         
+        # SQLite thread safety
+        self._db_lock = threading.Lock()
+        self._pending_commits = 0
+        self._last_commit_time = time.time()
+        
         # Setup logging
         self._setup_file_logger()
         self._setup_sqlite()
@@ -95,8 +105,9 @@ class Logger:
         """Setup rotating file logger."""
         self.file_logger = logging.getLogger('ARPDefender')
         self.file_logger.setLevel(getattr(logging, self.log_config.get('log_level', 'INFO').upper()))
+        self.file_logger.propagate = False
         
-        # Clear existing handlers
+        # Clear all handlers to prevent duplicates on re-init
         self.file_logger.handlers.clear()
         
         # File handler with rotation
@@ -196,6 +207,21 @@ class Logger:
         
         self.conn.commit()
     
+    def _batch_commit(self, force: bool = False):
+        """Commit pending DB changes, batching for performance."""
+        self._pending_commits += 1
+        current_time = time.time()
+        elapsed = current_time - self._last_commit_time
+        
+        if force or self._pending_commits >= DB_COMMIT_BATCH_SIZE or elapsed >= DB_COMMIT_INTERVAL:
+            with self._db_lock:
+                try:
+                    self.conn.commit()
+                    self._pending_commits = 0
+                    self._last_commit_time = current_time
+                except Exception as e:
+                    self.file_logger.error(f"Database commit error: {e}")
+    
     def log_packet(self, packet_info: Dict):
         """
         Log a captured packet.
@@ -212,24 +238,25 @@ class Logger:
         
         # Log to SQLite
         if self.db_enabled:
-            self.cursor.execute('''
-                INSERT INTO packets (timestamp, source_ip, destination_ip, protocol, 
-                                    source_port, destination_port, size, source_mac, 
-                                    destination_mac, info)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                datetime.now().isoformat(),
-                packet_info.get('source_ip'),
-                packet_info.get('destination_ip'),
-                packet_info.get('protocol'),
-                packet_info.get('source_port'),
-                packet_info.get('destination_port'),
-                packet_info.get('size'),
-                packet_info.get('source_mac'),
-                packet_info.get('destination_mac'),
-                packet_info.get('info')
-            ))
-            self.conn.commit()
+            with self._db_lock:
+                self.cursor.execute('''
+                    INSERT INTO packets (timestamp, source_ip, destination_ip, protocol, 
+                                        source_port, destination_port, size, source_mac, 
+                                        destination_mac, info)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    datetime.now().isoformat(),
+                    packet_info.get('source_ip'),
+                    packet_info.get('destination_ip'),
+                    packet_info.get('protocol'),
+                    packet_info.get('source_port'),
+                    packet_info.get('destination_port'),
+                    packet_info.get('size'),
+                    packet_info.get('source_mac'),
+                    packet_info.get('destination_mac'),
+                    packet_info.get('info')
+                ))
+            self._batch_commit()
     
     def log_arp_entry(self, ip: str, mac: str, is_suspicious: bool = False, 
                      alert_type: str = None, details: str = None):
@@ -248,19 +275,20 @@ class Logger:
         
         # Log to SQLite
         if self.db_enabled:
-            self.cursor.execute('''
-                INSERT INTO arp_entries (timestamp, ip_address, mac_address, 
-                                        is_suspicious, alert_type, details)
-                VALUES (?, ?, ?, ?, ?, ?)
-            ''', (
-                datetime.now().isoformat(),
-                ip,
-                mac,
-                1 if is_suspicious else 0,
-                alert_type,
-                details
-            ))
-            self.conn.commit()
+            with self._db_lock:
+                self.cursor.execute('''
+                    INSERT INTO arp_entries (timestamp, ip_address, mac_address, 
+                                            is_suspicious, alert_type, details)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                ''', (
+                    datetime.now().isoformat(),
+                    ip,
+                    mac,
+                    1 if is_suspicious else 0,
+                    alert_type,
+                    details
+                ))
+            self._batch_commit()
     
     def log_alert(self, alert_type: str, severity: str, message: str,
                  source_ip: str = None, destination_ip: str = None, 
@@ -287,20 +315,21 @@ class Logger:
         
         # Log to SQLite
         if self.db_enabled:
-            self.cursor.execute('''
-                INSERT INTO alerts (timestamp, alert_type, severity, source_ip, 
-                                   destination_ip, message, details)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                datetime.now().isoformat(),
-                alert_type,
-                severity,
-                source_ip,
-                destination_ip,
-                message,
-                json.dumps(details) if details else None
-            ))
-            self.conn.commit()
+            with self._db_lock:
+                self.cursor.execute('''
+                    INSERT INTO alerts (timestamp, alert_type, severity, source_ip, 
+                                       destination_ip, message, details)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    datetime.now().isoformat(),
+                    alert_type,
+                    severity,
+                    source_ip,
+                    destination_ip,
+                    message,
+                    json.dumps(details) if details else None
+                ))
+            self._batch_commit()
         
         # Send notifications
         self._send_notifications(alert_type, severity, message, source_ip, 
@@ -460,23 +489,24 @@ class Logger:
             stats: Statistics dictionary
         """
         if self.db_enabled:
-            self.cursor.execute('''
-                INSERT INTO traffic_stats (timestamp, interface, total_packets, total_bytes,
-                                         tcp_packets, udp_packets, icmp_packets, 
-                                         arp_packets, other_packets)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                datetime.now().isoformat(),
-                interface,
-                stats.get('total_packets', 0),
-                stats.get('total_bytes', 0),
-                stats.get('tcp_packets', 0),
-                stats.get('udp_packets', 0),
-                stats.get('icmp_packets', 0),
-                stats.get('arp_packets', 0),
-                stats.get('other_packets', 0)
-            ))
-            self.conn.commit()
+            with self._db_lock:
+                self.cursor.execute('''
+                    INSERT INTO traffic_stats (timestamp, interface, total_packets, total_bytes,
+                                             tcp_packets, udp_packets, icmp_packets, 
+                                             arp_packets, other_packets)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    datetime.now().isoformat(),
+                    interface,
+                    stats.get('total_packets', 0),
+                    stats.get('total_bytes', 0),
+                    stats.get('tcp_packets', 0),
+                    stats.get('udp_packets', 0),
+                    stats.get('icmp_packets', 0),
+                    stats.get('arp_packets', 0),
+                    stats.get('other_packets', 0)
+                ))
+            self._batch_commit(force=True)
     
     def get_statistics(self) -> Dict:
         """Get current statistics."""
@@ -507,10 +537,12 @@ class Logger:
         
         query += " ORDER BY timestamp DESC"
         
-        self.cursor.execute(query, params)
-        columns = [description[0] for description in self.cursor.description]
+        with self._db_lock:
+            self.cursor.execute(query, params)
+            columns = [description[0] for description in self.cursor.description]
+            rows = self.cursor.fetchall()
         
-        return [dict(zip(columns, row)) for row in self.cursor.fetchall()]
+        return [dict(zip(columns, row)) for row in rows]
     
     def get_alerts(self, hours: int = 24, severity: str = None) -> List[Dict]:
         """
@@ -535,10 +567,12 @@ class Logger:
         
         query += " ORDER BY timestamp DESC"
         
-        self.cursor.execute(query, params)
-        columns = [description[0] for description in self.cursor.description]
+        with self._db_lock:
+            self.cursor.execute(query, params)
+            columns = [description[0] for description in self.cursor.description]
+            rows = self.cursor.fetchall()
         
-        return [dict(zip(columns, row)) for row in self.cursor.fetchall()]
+        return [dict(zip(columns, row)) for row in rows]
     
     def print_banner(self, interface: str):
         """Print the application banner."""
@@ -627,4 +661,7 @@ class Logger:
     def close(self):
         """Close database connection."""
         if self.db_enabled:
-            self.conn.close()
+            # Flush any pending commits
+            self._batch_commit(force=True)
+            with self._db_lock:
+                self.conn.close()
